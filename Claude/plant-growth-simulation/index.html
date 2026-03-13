@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tree Life Cycle</title>
+<style>
+* { margin: 0; padding: 0; }
+body { background: #000; overflow: hidden; }
+canvas { display: block; }
+#label {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgba(255,255,255,0.45);
+  font-family: 'Georgia', serif;
+  font-size: 13px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  pointer-events: none;
+  transition: opacity 0.8s;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="label">Sprout</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const label  = document.getElementById('label');
+
+let W, H;
+function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+resize();
+window.addEventListener('resize', () => { resize(); init(); });
+
+// ─────────────────────── PHASES ───────────────────────────
+const PHASES = ['SPROUT','GROWING','MATURE','AGING','SHEDDING','BARE','COLLAPSE','FADE'];
+const DUR = { SPROUT:2500, GROWING:8000, MATURE:5500, AGING:4500, SHEDDING:6000, BARE:2500, COLLAPSE:3200, FADE:1600 };
+const LABELS = { SPROUT:'Sprout', GROWING:'Growing', MATURE:'Mature', AGING:'Aging',
+                 SHEDDING:'Shedding', BARE:'Bare', COLLAPSE:'Falling', FADE:'' };
+
+const SKY = {
+  SPROUT:   ['#0b1628','#1c3558'],
+  GROWING:  ['#1a3566','#5a9fd4'],
+  MATURE:   ['#1460b8','#88c8f8'],
+  AGING:    ['#7a3b00','#e07828'],
+  SHEDDING: ['#5c2e10','#aa5e28'],
+  BARE:     ['#28283c','#58587a'],
+  COLLAPSE: ['#18182c','#383858'],
+  FADE:     ['#040410','#0c0c1c'],
+};
+
+const GCOLOR = {
+  SPROUT:'#2a5818', GROWING:'#387a1c', MATURE:'#488a22', AGING:'#785818',
+  SHEDDING:'#684818', BARE:'#382810', COLLAPSE:'#28200c', FADE:'#181408',
+};
+
+// ─────────────────────── STATE ────────────────────────────
+let phase = 'SPROUT', phaseElapsed = 0, phaseT = 0, lastTime = null;
+let branches = [], fallingLeaves = [], grassBlades = [];
+let treeBaseX, treeBaseY, growT = 0, collapseAngle = 0, globalAlpha = 1;
+let windTime = 0, windAmp = 8, nextGust = 2000;
+
+function rnd(a,b) { return a + Math.random()*(b-a); }
+function clamp(v,lo,hi) { return Math.max(lo,Math.min(hi,v)); }
+function smoothstep(t) { return t*t*(3-2*t); }
+
+// ─────────────────────── TREE GEN ─────────────────────────
+function generateTree() {
+  branches = []; fallingLeaves = []; growT = 0; collapseAngle = 0; globalAlpha = 1;
+  treeBaseX = W/2 + rnd(-25,25);
+  treeBaseY = H * 0.80;
+
+  let bid = 0;
+  function grow(x1,y1,angle,len,thick,depth,tStart) {
+    if (thick < 1.2 || depth > 5) return;
+    const dur = Math.max(0.07, 0.27 - depth*0.025);
+    const tEnd = Math.min(tStart + dur, 1.0);
+    const x2 = x1 + Math.cos(angle)*len;
+    const y2 = y1 + Math.sin(angle)*len;
+    const b = { id:bid++, x1,y1,x2,y2, len,thick,depth,tStart,tEnd, leaves:null };
+    branches.push(b);
+
+    if (depth >= 4) {
+      b.leaves = [];
+      const n = Math.floor(rnd(7,15));
+      for (let i=0;i<n;i++) b.leaves.push({
+        ox:rnd(-28,28), oy:rnd(-28,6),
+        rx:rnd(10,18),  ry:rnd(7,13),
+        rot:rnd(0,Math.PI), wp:rnd(0,Math.PI*2),
+        alive:true,
+        px:0,py:0,pvx:0,pvy:0,prot:0,protv:0,palpha:1,
+      });
+      return;
+    }
+
+    const nKids  = depth===0 ? 2 : (Math.random()<0.5 ? 2 : 3);
+    const spread = [0, 0.88, 1.1, 1.35, 1.6][depth] || 1.5;
+    const cStart = Math.max(0, tEnd-0.04);
+    for (let i=0;i<nKids;i++) {
+      const f  = nKids===1 ? 0.5 : i/(nKids-1);
+      const da = (f-0.5)*spread + rnd(-0.12,0.12);
+      grow(x2,y2, angle+da, len*rnd(0.55,0.68), thick*0.62, depth+1, cStart);
+    }
+  }
+
+  grow(treeBaseX, treeBaseY, -Math.PI/2+rnd(-0.1,0.1), H*0.26, 15, 0, 0.0);
+}
+
+function generateGrass() {
+  grassBlades = [];
+  for (let i=0;i<40;i++) grassBlades.push({
+    x: treeBaseX + rnd(-180,180),
+    h: rnd(12,32), w: rnd(1,2.5),
+    cx: rnd(-6,6), ex: rnd(-8,8),
+    wp: rnd(0,Math.PI*2),
+  });
+}
+
+// ─────────────────────── SKY / SUN ────────────────────────
+function drawSky() {
+  const [t,b] = SKY[phase];
+  const g = ctx.createLinearGradient(0,0,0,treeBaseY);
+  g.addColorStop(0,t); g.addColorStop(1,b);
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,W,treeBaseY);
+}
+
+function drawSun() {
+  if (!['GROWING','MATURE','AGING'].includes(phase)) return;
+  const order = ['GROWING','MATURE','AGING'];
+  const baseT = (order.indexOf(phase) + phaseT) / 3;
+  const sx = W*(0.08 + baseT*0.84);
+  const sy = treeBaseY*0.9 - treeBaseY*0.72*Math.sin(baseT*Math.PI);
+  const edgeN = clamp(1 - Math.abs(baseT-0.5)*4, 0, 1);
+  const hue = 38 + edgeN*22, lig = 52 + edgeN*12;
+  ctx.save();
+  ctx.shadowBlur = 28; ctx.shadowColor = `hsl(${hue},90%,72%)`;
+  ctx.fillStyle = `hsl(${hue},90%,${lig}%)`;
+  ctx.beginPath(); ctx.arc(sx,sy,26,0,Math.PI*2); ctx.fill();
+  // glow ring
+  ctx.globalAlpha = 0.18;
+  ctx.beginPath(); ctx.arc(sx,sy,42,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+// ─────────────────────── GROUND ───────────────────────────
+function drawGround() {
+  const gc = GCOLOR[phase];
+  const gy = treeBaseY;
+
+  // dark soil
+  ctx.fillStyle = '#0a0804';
+  ctx.fillRect(0, gy, W, H-gy);
+
+  // surface
+  ctx.fillStyle = gc;
+  ctx.beginPath();
+  ctx.moveTo(0, gy+5);
+  for (let x=0;x<=W;x+=18) {
+    ctx.lineTo(x, gy + Math.sin(x*0.022)*4 + Math.sin(x*0.055+1)*2);
+  }
+  ctx.lineTo(W, H); ctx.lineTo(0, H);
+  ctx.closePath(); ctx.fill();
+
+  // grass blades
+  const showGrass = ['SPROUT','GROWING','MATURE'].includes(phase);
+  if (showGrass) {
+    const gc2 = phase==='MATURE' ? '#5ab830' : '#48a022';
+    const sway = Math.sin(windTime*1.6)*windAmp*0.012;
+    ctx.strokeStyle = gc2;
+    for (const g of grassBlades) {
+      const wx = sway * (g.h/30) * Math.sin(windTime*1.1+g.wp);
+      ctx.lineWidth = g.w;
+      ctx.beginPath();
+      ctx.moveTo(g.x, gy);
+      ctx.quadraticCurveTo(g.x+g.cx+wx*8, gy-g.h*0.6, g.x+g.ex+wx*14, gy-g.h);
+      ctx.stroke();
+    }
+  }
+}
+
+// ─────────────────────── SPROUT ───────────────────────────
+function drawSprout(t) {
+  const bx=treeBaseX, by=treeBaseY;
+  const e = smoothstep(t);
+  const sh = H*0.055*e;
+
+  ctx.strokeStyle='#5a9e28'; ctx.lineWidth=2.5*e; ctx.lineCap='round';
+  ctx.beginPath();
+  ctx.moveTo(bx,by);
+  ctx.quadraticCurveTo(bx-4, by-sh*0.5, bx, by-sh);
+  ctx.stroke();
+
+  if (t>0.32) {
+    const lt = smoothstep((t-0.32)/0.68);
+    const ls = 15*lt;
+    const ty = by-sh;
+
+    function leaf(offX, rotA) {
+      ctx.save();
+      ctx.fillStyle=`rgba(65,145,28,${lt*0.92})`;
+      ctx.translate(bx+offX, ty-ls*0.15);
+      ctx.rotate(rotA);
+      ctx.beginPath(); ctx.ellipse(0,0,ls*0.85,ls*0.42,0,0,Math.PI*2);
+      ctx.fill(); ctx.restore();
+    }
+    leaf(-ls*0.75, -0.55);
+    leaf( ls*0.75,  0.55);
+    if (t>0.65) {
+      const lt2 = smoothstep((t-0.65)/0.35);
+      ctx.fillStyle=`rgba(60,135,25,${lt2*0.85})`;
+      ctx.save();
+      ctx.translate(bx, ty-ls*0.8);
+      ctx.beginPath(); ctx.ellipse(0,0,ls*0.5,ls*0.28,0,0,Math.PI*2);
+      ctx.fill(); ctx.restore();
+    }
+  }
+}
+
+// ─────────────────────── BRANCHES ─────────────────────────
+function getBP(b) {
+  if (growT<=b.tStart) return 0;
+  if (growT>=b.tEnd)   return 1;
+  return (growT-b.tStart)/(b.tEnd-b.tStart);
+}
+
+function drawBranches() {
+  ctx.lineCap = 'round';
+  for (const b of branches) {
+    const p = getBP(b);
+    if (p<=0) continue;
+    const tx = b.x1+(b.x2-b.x1)*p;
+    const ty = b.y1+(b.y2-b.y1)*p;
+    const li = 18 + b.depth*7;
+    ctx.strokeStyle = `hsl(25,48%,${li}%)`;
+    ctx.lineWidth   = Math.max(1, b.thick*(0.45+p*0.55));
+    ctx.beginPath(); ctx.moveTo(b.x1,b.y1); ctx.lineTo(tx,ty); ctx.stroke();
+  }
+}
+
+// ─────────────────────── LEAVES ───────────────────────────
+function leafColor(leaf) {
+  if (phase==='GROWING'||phase==='MATURE') {
+    const h = 95 + (leaf.wp%1)*18;
+    return `hsl(${h},65%,28%)`;
+  }
+  if (phase==='AGING') {
+    if (phaseT<0.5) {
+      const h = 95 - phaseT*2*52;
+      return `hsl(${h},70%,${28+phaseT*2*10}%)`;
+    } else {
+      const t2=(phaseT-0.5)*2;
+      return `hsl(${44-t2*34},78%,${38+t2*8}%)`;
+    }
+  }
+  return `hsl(${10+(leaf.wp%1)*18},72%,38%)`;
+}
+
+function drawLeafClusters(sway) {
+  const show = ['GROWING','MATURE','AGING','SHEDDING'];
+  if (!show.includes(phase)) return;
+
+  for (const b of branches) {
+    if (!b.leaves || getBP(b)<1) continue;
+
+    let baseAlpha = 1;
+    if (phase==='GROWING') {
+      baseAlpha = clamp((growT-b.tEnd)/0.06,0,1);
+      if (baseAlpha<=0) continue;
+    }
+
+    for (const leaf of b.leaves) {
+      if (!leaf.alive) continue;
+      const wx = Math.sin(windTime*1.25+leaf.wp)*sway;
+      const wy = Math.cos(windTime*0.9 +leaf.wp)*sway*0.18;
+      ctx.save();
+      ctx.globalAlpha *= baseAlpha;
+      ctx.fillStyle = leafColor(leaf);
+      ctx.translate(b.x2+leaf.ox+wx, b.y2+leaf.oy+wy);
+      ctx.rotate(leaf.rot + windTime*0.014*Math.sin(leaf.wp));
+      ctx.beginPath(); ctx.ellipse(0,0,leaf.rx,leaf.ry,0,0,Math.PI*2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+function drawFallingLeaves() {
+  for (const fl of fallingLeaves) {
+    ctx.save();
+    ctx.globalAlpha = fl.palpha;
+    ctx.fillStyle = fl.color;
+    ctx.translate(fl.px,fl.py); ctx.rotate(fl.prot);
+    ctx.beginPath(); ctx.ellipse(0,0,fl.rx,fl.ry,0,0,Math.PI*2);
+    ctx.fill(); ctx.restore();
+  }
+}
+
+// ─────────────────────── PHASE LOGIC ──────────────────────
+function nextPhase() {
+  const idx = PHASES.indexOf(phase);
+  phase = PHASES[(idx+1)%PHASES.length];
+  phaseElapsed = 0; phaseT = 0;
+  label.textContent = LABELS[phase]||'';
+
+  if (phase==='SPROUT') init();
+  if (phase==='SHEDDING') {
+    for (const b of branches) {
+      if (b.leaves) b.leaves.forEach(l=>{ l.alive=true; });
+    }
+  }
+}
+
+function shedLeaves(dt) {
+  const rate = 0.0022*(dt/16)*(0.2+phaseT*1.8);
+  for (const b of branches) {
+    if (!b.leaves) continue;
+    for (const leaf of b.leaves) {
+      if (!leaf.alive||Math.random()>rate) continue;
+      leaf.alive = false;
+      const wx = Math.sin(windTime*1.25+leaf.wp)*windAmp;
+      fallingLeaves.push({
+        px: b.x2+leaf.ox+wx, py: b.y2+leaf.oy,
+        pvx:rnd(-1.8,1.8), pvy:rnd(-0.8,0.5),
+        prot:leaf.rot, protv:rnd(-0.05,0.05),
+        rx:leaf.rx, ry:leaf.ry,
+        color:`hsl(${rnd(5,28)},72%,38%)`,
+        palpha:1,
+      });
+    }
+  }
+}
+
+// ─────────────────────── LOOP ─────────────────────────────
+function frame(ts) {
+  if (!lastTime) lastTime = ts;
+  const dt = Math.min(ts-lastTime, 50);
+  lastTime = ts;
+
+  phaseElapsed += dt;
+  phaseT = Math.min(phaseElapsed/DUR[phase], 1);
+
+  // wind
+  windTime += dt*0.001;
+  nextGust -= dt;
+  if (nextGust<=0) { windAmp=rnd(6,20); nextGust=rnd(2000,6000); }
+  windAmp *= 0.9975;
+
+  if (phase==='GROWING') growT = phaseT;
+  else if (phase!=='SPROUT') growT = 1;
+
+  if (phase==='COLLAPSE') collapseAngle = smoothstep(phaseT)*1.52; // ~87°
+
+  globalAlpha = phase==='FADE' ? Math.max(0,1-phaseT) : 1;
+
+  if (phase==='SHEDDING') shedLeaves(dt);
+
+  // update particles
+  const windDrift = Math.sin(windTime*0.65)*windAmp*0.055;
+  for (let i=fallingLeaves.length-1;i>=0;i--) {
+    const fl=fallingLeaves[i];
+    fl.pvx += windDrift; fl.pvy += 0.11;
+    fl.pvx *= 0.985; fl.pvy *= 0.995;
+    fl.px += fl.pvx*dt/16; fl.py += fl.pvy*dt/16;
+    fl.prot += fl.protv*dt/16;
+    if (fl.py>treeBaseY) fl.palpha = Math.max(0, fl.palpha-0.022*dt/16);
+    if (fl.palpha<=0||fl.py>H) fallingLeaves.splice(i,1);
+  }
+
+  if (phaseT>=1) nextPhase();
+
+  // ── RENDER ────────────────────────────────────────────
+  ctx.clearRect(0,0,W,H);
+  ctx.save();
+  ctx.globalAlpha = globalAlpha;
+
+  drawSky();
+  drawSun();
+
+  const sway = Math.sin(windTime*1.9)*windAmp*0.5
+             + Math.sin(windTime*2.8+1.2)*windAmp*0.18;
+
+  ctx.save();
+  // apply rotation for sway or collapse, pivoting at tree base
+  if (phase==='COLLAPSE') {
+    ctx.translate(treeBaseX, treeBaseY);
+    ctx.rotate(collapseAngle);
+    ctx.translate(-treeBaseX,-treeBaseY);
+  } else if (['MATURE','AGING','SHEDDING'].includes(phase)) {
+    ctx.translate(treeBaseX, treeBaseY);
+    ctx.rotate(sway*0.0028);
+    ctx.translate(-treeBaseX,-treeBaseY);
+  }
+
+  if (phase==='SPROUT') {
+    drawSprout(phaseT);
+  } else {
+    drawBranches();
+    drawLeafClusters(sway);
+  }
+  ctx.restore();
+
+  drawFallingLeaves();
+  drawGround();
+
+  ctx.restore();
+
+  requestAnimationFrame(frame);
+}
+
+// ─────────────────────── BOOT ─────────────────────────────
+function init() {
+  generateTree();
+  generateGrass();
+  phase = 'SPROUT';
+  phaseElapsed = 0; phaseT = 0;
+  label.textContent = 'Sprout';
+}
+
+init();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
